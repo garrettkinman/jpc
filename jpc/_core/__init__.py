@@ -10,6 +10,7 @@ from ._energies import (
     hpc_energy_fn as hpc_energy_fn,
     bpc_energy_fn as bpc_energy_fn,
     epc_energy_fn as epc_energy_fn,
+    bepc_energy_fn as bepc_energy_fn,
     pdm_energy_fn as pdm_energy_fn,
     _get_param_scalings as _get_param_scalings
 )
@@ -24,6 +25,8 @@ from ._grads import (
     compute_bpc_param_grads as compute_bpc_param_grads,
     compute_epc_error_grad as compute_epc_error_grad,
     compute_epc_param_grads as compute_epc_param_grads,
+    compute_bepc_error_grad as compute_bepc_error_grad,
+    compute_bepc_param_grads as compute_bepc_param_grads,
     compute_pdm_activity_grad as compute_pdm_activity_grad,
     compute_pdm_param_grads as compute_pdm_param_grads
 )
@@ -37,6 +40,8 @@ from ._updates import (
     update_bpc_params as update_bpc_params,
     update_epc_errors as update_epc_errors,
     update_epc_params as update_epc_params,
+    update_bepc_errors as update_bepc_errors,
+    update_bepc_params as update_bepc_params,
     update_pdm_activities as update_pdm_activities,
     update_pdm_params as update_pdm_params
 )

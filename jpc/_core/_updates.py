@@ -13,6 +13,8 @@ from ._grads import (
     compute_bpc_param_grads,
     compute_epc_error_grad,
     compute_epc_param_grads,
+    compute_bepc_error_grad,
+    compute_bepc_param_grads,
     compute_pdm_activity_grad,
     compute_pdm_param_grads
 )
@@ -938,6 +940,141 @@ def update_epc_params(
         "skip_model": skip_model,
         "grads": grads,
         "opt_state": opt_state
+    }
+
+
+@eqx.filter_jit
+def update_bepc_errors(
+    top_down_model: PyTree[Callable],
+    bottom_up_model: PyTree[Callable],
+    errors: PyTree[ArrayLike],
+    optim: GradientTransformation | GradientTransformationExtraArgs,
+    opt_state: OptState,
+    output: ArrayLike,
+    *,
+    input: Optional[ArrayLike] = None,
+    skip_model: Optional[PyTree[Callable]] = None,
+    loss_id: str = "mse",
+    param_type: str = "sp",
+    backward_energy_weight: Scalar = 1.0,
+    forward_energy_weight: Scalar = 1.0,
+) -> Dict:
+    """Updates errors of a bidirectional ePC (bePC) network.
+
+    **Main arguments:**
+
+    - `top_down_model`: List of callable model layers for the forward model.
+    - `bottom_up_model`: List of callable model layers for the backward model.
+    - `errors`: List of prediction errors for each layer free to vary.
+    - `optim`: optax optimiser, e.g. `optax.sgd()`.
+    - `opt_state`: State of optax optimiser.
+    - `output`: Target of the `top_down_model` and input to the `bottom_up_model`.
+
+    **Other arguments:** see [`bepc_energy_fn()`](https://thebuckleylab.github.io/jpc/api/Energy%20functions/#jpc.bepc_energy_fn).
+
+    **Returns:**
+
+    Dictionary with energy, updated errors, error gradients, and optimiser state.
+
+    """
+    energy, grads = compute_bepc_error_grad(
+        top_down_model=top_down_model,
+        bottom_up_model=bottom_up_model,
+        errors=errors,
+        y=output,
+        x=input,
+        skip_model=skip_model,
+        loss_id=loss_id,
+        param_type=param_type,
+        backward_energy_weight=backward_energy_weight,
+        forward_energy_weight=forward_energy_weight,
+    )
+    updates, opt_state = optim.update(
+        updates=grads,
+        state=opt_state,
+        params=errors,
+    )
+    errors = eqx.apply_updates(model=errors, updates=updates)
+    return {
+        "energy": energy,
+        "errors": errors,
+        "grads": grads,
+        "opt_state": opt_state,
+    }
+
+
+@eqx.filter_jit
+def update_bepc_params(
+    top_down_model: PyTree[Callable],
+    bottom_up_model: PyTree[Callable],
+    errors: PyTree[ArrayLike],
+    top_down_optim: GradientTransformation | GradientTransformationExtraArgs,
+    bottom_up_optim: GradientTransformation | GradientTransformationExtraArgs,
+    top_down_opt_state: OptState,
+    bottom_up_opt_state: OptState,
+    output: ArrayLike,
+    *,
+    input: Optional[ArrayLike] = None,
+    skip_model: Optional[PyTree[Callable]] = None,
+    loss_id: str = "mse",
+    param_type: str = "sp",
+    backward_energy_weight: Scalar = 1.0,
+    forward_energy_weight: Scalar = 1.0,
+) -> Dict:
+    """Updates parameters of a bidirectional ePC (bePC) network.
+
+    **Main arguments:**
+
+    - `top_down_model`: List of callable model layers for the forward model.
+    - `bottom_up_model`: List of callable model layers for the backward model.
+    - `errors`: List of prediction errors for each layer free to vary.
+    - `top_down_optim`: optax optimiser for the top-down model.
+    - `bottom_up_optim`: optax optimiser for the bottom-up model.
+    - `top_down_opt_state`: State of the top-down optimiser.
+    - `bottom_up_opt_state`: State of the bottom-up optimiser.
+    - `output`: Target of the `top_down_model` and input to the `bottom_up_model`.
+
+    **Other arguments:** see [`bepc_energy_fn()`](https://thebuckleylab.github.io/jpc/api/Energy%20functions/#jpc.bepc_energy_fn).
+
+    **Returns:**
+
+    Dictionary with updated models, parameter gradients, and optimiser states.
+
+    """
+    top_down_grads, bottom_up_grads = compute_bepc_param_grads(
+        top_down_model=top_down_model,
+        bottom_up_model=bottom_up_model,
+        errors=errors,
+        y=output,
+        x=input,
+        skip_model=skip_model,
+        loss_id=loss_id,
+        param_type=param_type,
+        backward_energy_weight=backward_energy_weight,
+        forward_energy_weight=forward_energy_weight,
+    )
+    top_down_updates, top_down_opt_state = top_down_optim.update(
+        updates=top_down_grads,
+        state=top_down_opt_state,
+        params=top_down_model,
+    )
+    bottom_up_updates, bottom_up_opt_state = bottom_up_optim.update(
+        updates=bottom_up_grads,
+        state=bottom_up_opt_state,
+        params=bottom_up_model,
+    )
+    top_down_model = eqx.apply_updates(
+        model=top_down_model,
+        updates=top_down_updates,
+    )
+    bottom_up_model = eqx.apply_updates(
+        model=bottom_up_model,
+        updates=bottom_up_updates,
+    )
+    return {
+        "models": (top_down_model, bottom_up_model),
+        "grads": (top_down_grads, bottom_up_grads),
+        "opt_states": (top_down_opt_state, bottom_up_opt_state),
     }
 
 

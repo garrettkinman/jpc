@@ -450,6 +450,133 @@ def epc_energy_fn(
     return total_energy / batch_size
 
 
+def bepc_energy_fn(
+    top_down_model: PyTree[Callable],
+    bottom_up_model: PyTree[Callable],
+    errors: PyTree[ArrayLike],
+    y: ArrayLike,
+    *,
+    x: Optional[ArrayLike] = None,
+    skip_model: Optional[PyTree[Callable]] = None,
+    loss: str = "mse",
+    param_type: str = "sp",
+    backward_energy_weight: Scalar = 1.0,
+    forward_energy_weight: Scalar = 1.0,
+) -> Scalar:
+    r"""Computes the bidirectional ePC (bePC) energy, combining the
+    bidirectional PC architecture ([Oliviers et al., 2025](https://arxiv.org/abs/2505.23415))
+    with ePC's error reparameterisation ([Goemaere et al., 2025](https://arxiv.org/abs/2505.20137)).
+
+    $$
+    \mathcal{F} = \alpha_f \left[ \sum_{\ell=1}^{L-1} \tfrac{1}{2}\|\epsilon_\ell\|^2 + \tfrac{1}{2}\|\mathbf{y} - \tilde{f}(\mathbf{x}, \epsilon)\|^2 \right] + \alpha_b \sum_{\ell=0}^{L-1} \tfrac{1}{2}\|\tilde{\mathbf{z}}_\ell - g_{\ell+1}(\tilde{\mathbf{z}}_{\ell+1})\|^2
+    $$
+
+    where $\tilde{\mathbf{z}}_\ell = f_\ell(\tilde{\mathbf{z}}_{\ell-1}; \mathbf{W}_\ell) + \epsilon_\ell$
+    are the error-perturbed activities of the forward (top-down) network,
+    $g_{\ell+1}(\cdot; \mathbf{V}_{\ell+1})$ are the backward (bottom-up) layer
+    transformations, $\tilde{\mathbf{z}}_0 = \mathbf{x}$, $\tilde{\mathbf{z}}_L = \mathbf{y}$,
+    and $(\alpha_f, \alpha_b)$ weight the forward and backward energies, respectively.
+    Errors are the inference variables (as in ePC), while both the top-down and
+    bottom-up networks are learned (as in bPC).
+
+    **Main arguments:**
+
+    - `top_down_model`: List of callable model layers for the forward (generative)
+        model.
+    - `bottom_up_model`: List of callable model layers for the backward
+        (discriminative) model.
+    - `errors`: List of prediction errors for each layer.
+    - `y`: Target of the `top_down_model` and input to the `bottom_up_model`.
+
+    **Other arguments:**
+
+    - `x`: Optional input to the `top_down_model` and target of the
+        `bottom_up_model`. When `None`, the lowest error `errors[0]` is treated as
+        a free input variable.
+    - `skip_model`: Optional skip connection model for the top-down pass.
+    - `loss`: Loss function for the output layer. Options are `"mse"` (default) or
+        `"ce"`.
+    - `param_type`: Parameterisation. See [`_get_param_scalings()`](https://thebuckleylab.github.io/jpc/api/Energy%20functions/#jpc._get_param_scalings).
+        Defaults to `"sp"`.
+    - `backward_energy_weight`: Scalar weighting $\alpha_b$ for the backward energy
+        terms. Defaults to `1.0`.
+    - `forward_energy_weight`: Scalar weighting $\alpha_f$ for the forward energy
+        terms. Defaults to `1.0`.
+
+    **Returns:**
+
+    The total bePC energy normalised by batch size.
+
+    """
+    _check_param_type(param_type)
+
+    batch_size = y.shape[0]
+    L = len(top_down_model)
+    n_hidden = L - 1
+
+    if skip_model is None:
+        skip_model = [None] * L
+
+    scalings = _get_param_scalings(
+        model=top_down_model,
+        input=x if x is not None else errors[0],
+        skip_model=skip_model,
+        param_type=param_type,
+    )
+
+    # Error-perturbed forward pass: recover activities z̃_1, ..., z̃_H.
+    if x is not None:
+        current = x
+        error_idx = 0
+    else:
+        current = errors[0]
+        error_idx = 1
+    x_eff = current
+
+    activities = []
+    for net_l in range(n_hidden):
+        pred = scalings[net_l] * vmap(top_down_model[net_l])(current)
+        if skip_model[net_l] is not None:
+            pred += vmap(skip_model[net_l])(current)
+        current = pred + errors[error_idx]
+        activities.append(current)
+        error_idx += 1
+
+    zL = scalings[-1] * vmap(top_down_model[-1])(current) - errors[error_idx]
+
+    # Forward (top-down) energy: hidden-error regularisers + output loss.
+    fwd_energy = 0.0
+    err_start = 0 if x is not None else 1
+    for i in range(n_hidden):
+        fwd_energy += 0.5 * sum(errors[err_start + i] ** 2)
+
+    if loss == "mse":
+        fwd_energy += 0.5 * sum((y - zL) ** 2)
+    elif loss == "ce":
+        fwd_energy += - sum(y * log_softmax(zL))
+
+    # Backward (bottom-up) energy: predict each level from the one above.
+    bwd_energy = 0.0
+    if n_hidden >= 1:
+        bwd_energy += 0.5 * sum(
+            (x_eff - vmap(bottom_up_model[0])(activities[0])) ** 2
+        )
+        for l in range(n_hidden):
+            act_next = y if l == n_hidden - 1 else activities[l + 1]
+            delta_l = activities[l] - vmap(bottom_up_model[l + 1])(act_next)
+            bwd_energy += 0.5 * sum(delta_l ** 2)
+    else:
+        # No hidden layers: single bottom-up prediction of x from y.
+        bwd_energy += 0.5 * sum(
+            (x_eff - vmap(bottom_up_model[0])(y)) ** 2
+        )
+
+    total = (
+        forward_energy_weight * fwd_energy + backward_energy_weight * bwd_energy
+    ) / batch_size
+    return total
+
+
 def _pdm_single_layer_energy(
     top_down_model: PyTree[Callable],
     bottom_up_model: PyTree[Callable],

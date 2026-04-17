@@ -9,11 +9,12 @@ from typing import Tuple, Callable, Optional
 from diffrax import AbstractStepSizeController
 from ._energies import (
     bss_energy_fn,
-    pc_energy_fn, 
-    hpc_energy_fn, 
-    bpc_energy_fn, 
+    pc_energy_fn,
+    hpc_energy_fn,
+    bpc_energy_fn,
     epc_energy_fn,
-    pdm_energy_fn, 
+    bepc_energy_fn,
+    pdm_energy_fn,
     _pdm_single_layer_energy
 )
 
@@ -951,6 +952,112 @@ def compute_epc_param_grads(
         x=x,
         loss=loss_id,
         param_type=param_type
+    )
+
+
+def compute_bepc_error_grad(
+    top_down_model: PyTree[Callable],
+    bottom_up_model: PyTree[Callable],
+    errors: PyTree[ArrayLike],
+    y: ArrayLike,
+    *,
+    x: Optional[ArrayLike] = None,
+    skip_model: Optional[PyTree[Callable]] = None,
+    loss_id: str = "mse",
+    param_type: str = "sp",
+    backward_energy_weight: Scalar = 1.0,
+    forward_energy_weight: Scalar = 1.0,
+) -> Tuple[Scalar, PyTree[Array]]:
+    """Computes the gradient of the [bePC energy](https://thebuckleylab.github.io/jpc/api/Energy%20functions/#jpc.bepc_energy_fn)
+    with respect to the errors $∇_{\\epsilon} \\mathcal{F}$.
+
+    **Main arguments:**
+
+    - `top_down_model`: List of callable model layers for the forward model.
+    - `bottom_up_model`: List of callable model layers for the backward model.
+    - `errors`: List of prediction errors for each layer free to vary.
+    - `y`: Target of the `top_down_model` and input to the `bottom_up_model`.
+
+    **Other arguments:** see [`bepc_energy_fn()`](https://thebuckleylab.github.io/jpc/api/Energy%20functions/#jpc.bepc_energy_fn).
+
+    **Returns:**
+
+    The energy and its gradient with respect to the errors.
+
+    """
+    energy, dFdes = value_and_grad(bepc_energy_fn, argnums=2)(
+        top_down_model,
+        bottom_up_model,
+        errors,
+        y,
+        x=x,
+        skip_model=skip_model,
+        loss=loss_id,
+        param_type=param_type,
+        backward_energy_weight=backward_energy_weight,
+        forward_energy_weight=forward_energy_weight,
+    )
+    return energy, dFdes
+
+
+def compute_bepc_param_grads(
+    top_down_model: PyTree[Callable],
+    bottom_up_model: PyTree[Callable],
+    errors: PyTree[ArrayLike],
+    y: ArrayLike,
+    *,
+    x: Optional[ArrayLike] = None,
+    skip_model: Optional[PyTree[Callable]] = None,
+    loss_id: str = "mse",
+    param_type: str = "sp",
+    backward_energy_weight: Scalar = 1.0,
+    forward_energy_weight: Scalar = 1.0,
+) -> Tuple[PyTree[Array], PyTree[Array]]:
+    """Computes the gradient of the [bePC energy](https://thebuckleylab.github.io/jpc/api/Energy%20functions/#jpc.bepc_energy_fn)
+    with respect to the top-down and bottom-up model parameters.
+
+    **Main arguments:**
+
+    - `top_down_model`: List of callable model layers for the forward model.
+    - `bottom_up_model`: List of callable model layers for the backward model.
+    - `errors`: List of prediction errors for each layer free to vary.
+    - `y`: Target of the `top_down_model` and input to the `bottom_up_model`.
+
+    **Other arguments:** see [`bepc_energy_fn()`](https://thebuckleylab.github.io/jpc/api/Energy%20functions/#jpc.bepc_energy_fn).
+
+    **Returns:**
+
+    Tuple of parameter gradients for the top-down and bottom-up models.
+
+    """
+    def wrapped_energy_fn(
+        models, errors, y, x, skip_model, loss_id, param_type,
+        backward_energy_weight, forward_energy_weight,
+    ):
+        td, bu = models
+        return bepc_energy_fn(
+            td,
+            bu,
+            errors,
+            y,
+            x=x,
+            skip_model=skip_model,
+            loss=loss_id,
+            param_type=param_type,
+            backward_energy_weight=backward_energy_weight,
+            forward_energy_weight=forward_energy_weight,
+        )
+
+    return filter_grad(wrapped_energy_fn)(
+        (top_down_model, bottom_up_model),
+        errors,
+        y,
+        x,
+        skip_model,
+        loss_id,
+        param_type,
+        backward_energy_weight,
+        forward_energy_weight,
     )
 
 
